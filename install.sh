@@ -28,7 +28,6 @@ need curl
 need awk
 need grep
 need ssh-keygen
-need git
 
 say "Advized Proxmox Installer"
 echo "This creates an Ubuntu 24.04 VM and prepares it for Advized."
@@ -73,9 +72,7 @@ KNOWN_HOSTS="$KEY_DIR/known_hosts"
 ssh-keyscan -t ed25519 github.com > "$KNOWN_HOSTS" 2>/dev/null
 chmod 600 "$KNOWN_HOSTS"
 
-if ! GIT_SSH_COMMAND="ssh -i $KEY_PATH -o IdentitiesOnly=yes -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=yes" git ls-remote "$REPO_SSH" HEAD >/dev/null 2>&1; then
-  die "GitHub authentication failed. Confirm the deploy key was added to AlexanderJBlanchard/advized."
-fi
+say "Deploy key prepared. The VM will validate private-repository access during first boot."
 
 say "Downloading Ubuntu 24.04 cloud image"
 IMAGE_DIR="/var/lib/vz/template/iso"
@@ -111,6 +108,18 @@ fi
 qm set "$VMID" --sshkeys "$PUBKEY_PATH"
 
 say "Creating cloud-init first-boot configuration"
+if ! pvesm status | awk 'NR>1 {print $1}' | grep -Fxq "local"; then
+  die "Proxmox directory storage named local is required for the Cloud-Init snippet."
+fi
+LOCAL_CONTENT="$(pvesm config local | awk '/^content/ {print $2}')"
+if [[ ",$LOCAL_CONTENT," != *",snippets,"* ]]; then
+  warn "Enabling snippets content on Proxmox storage local."
+  if [[ -n "$LOCAL_CONTENT" ]]; then
+    pvesm set local --content "$LOCAL_CONTENT,snippets"
+  else
+    pvesm set local --content snippets
+  fi
+fi
 SNIPPET_DIR="/var/lib/vz/snippets"
 mkdir -p "$SNIPPET_DIR"
 USERDATA="$SNIPPET_DIR/advized-${VMID}-user.yaml"
@@ -156,18 +165,19 @@ write_files:
       cd /opt/advized
       cp .env.example .env
       python3 - <<'PY'
-from pathlib import Path
-import secrets
-p = Path('/opt/advized/.env')
-s = p.read_text()
-s = s.replace('POSTGRES_PASSWORD=REPLACE_WITH_LONG_RANDOM_HEX_VALUE', 'POSTGRES_PASSWORD=' + secrets.token_hex(32))
-s = s.replace('SESSION_SECRET=REPLACE_WITH_AT_LEAST_32_RANDOM_CHARACTERS', 'SESSION_SECRET=' + secrets.token_hex(32))
-s = s.replace('METRICS_TOKEN=REPLACE_WITH_LONG_RANDOM_VALUE', 'METRICS_TOKEN=' + secrets.token_hex(32))
-p.write_text(s)
-PY
+      from pathlib import Path
+      import secrets
+      p = Path('/opt/advized/.env')
+      s = p.read_text()
+      s = s.replace('POSTGRES_PASSWORD=REPLACE_WITH_LONG_RANDOM_HEX_VALUE', 'POSTGRES_PASSWORD=' + secrets.token_hex(32))
+      s = s.replace('SESSION_SECRET=REPLACE_WITH_AT_LEAST_32_RANDOM_CHARACTERS', 'SESSION_SECRET=' + secrets.token_hex(32))
+      s = s.replace('METRICS_TOKEN=REPLACE_WITH_LONG_RANDOM_VALUE', 'METRICS_TOKEN=' + secrets.token_hex(32))
+      p.write_text(s)
+      PY
       chmod 600 .env
       docker compose -f compose.yaml config
-      docker compose -f compose.yaml up -d --build
+      docker compose -f compose.yaml build
+      docker compose -f compose.yaml up -d postgres
       touch /var/lib/advized-bootstrap-complete
 runcmd:
   - [ bash, -lc, "/usr/local/sbin/advized-bootstrap.sh > /var/log/advized-bootstrap.log 2>&1" ]
@@ -186,8 +196,8 @@ echo "VM Name:     $VM_NAME"
 echo "SSH user:    $VM_USER"
 echo "Admin key:   $PRIVKEY_PATH"
 echo
-echo "The VM will install Docker, clone the private repository, generate local secrets, and start Compose."
-echo "You still need to set DISCORD_TOKEN, CLIENT_ID, CLIENT_SECRET, and GUILD_ID in /opt/advized/.env."
+echo "The VM will install Docker, clone the private repository, generate local secrets, build Advized, and start PostgreSQL."
+echo "You still need to set DISCORD_TOKEN, CLIENT_ID, CLIENT_SECRET, and GUILD_ID in /opt/advized/.env, then start Advized with: docker compose -f /opt/advized/compose.yaml up -d"
 echo
 echo "To watch first boot from Proxmox:"
 echo "  qm terminal $VMID"
