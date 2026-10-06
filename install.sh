@@ -53,6 +53,7 @@ qm status "$VMID" >/dev/null 2>&1 && die "VM ID $VMID already exists."
 ip link show "$BRIDGE" >/dev/null 2>&1 || die "Bridge $BRIDGE does not exist."
 pvesm status | awk 'NR>1 {print $1}' | grep -Fxq "$STORAGE" || die "Storage $STORAGE not found."
 pvesm status | awk 'NR>1 {print $1}' | grep -Fxq "$CLOUD_IMAGE_STORAGE" || die "Storage $CLOUD_IMAGE_STORAGE not found."
+[[ -e /dev/kvm ]] || die "Hardware virtualization is unavailable. Enable AMD SVM/AMD-V or Intel VT-x in BIOS/UEFI before running this installer."
 
 say "Generating a read-only GitHub deploy key"
 KEY_DIR="/root/.config/advized-installer"
@@ -84,6 +85,7 @@ if [[ ! -f "$PRIVKEY_PATH" ]]; then
 fi
 chmod 600 "$PRIVKEY_PATH"
 chmod 644 "$PUBKEY_PATH"
+ADMIN_PUBKEY="$(cat "$PUBKEY_PATH")"
 
 KNOWN_HOSTS="$KEY_DIR/known_hosts"
 ssh-keyscan -t ed25519 github.com > "$KNOWN_HOSTS" 2>/dev/null
@@ -115,9 +117,6 @@ qm set "$VMID" --boot order=scsi0
 qm set "$VMID" --serial0 socket --vga serial0
 qm set "$VMID" --ipconfig0 ip=dhcp
 
-qm set "$VMID" --ciuser "$VM_USER"
-
-qm set "$VMID" --sshkeys "$PUBKEY_PATH"
 
 say "Creating cloud-init first-boot configuration"
 if ! pvesm status | awk 'NR>1 {print $1}' | grep -Fxq "local"; then
@@ -140,6 +139,18 @@ KNOWN_HOSTS_B64="$(base64 -w0 < "$KNOWN_HOSTS")"
 
 cat > "$USERDATA" <<EOF
 #cloud-config
+users:
+  - default
+  - name: $VM_USER
+    gecos: Advized Administrator
+    groups: [adm, sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - $ADMIN_PUBKEY
+ssh_pwauth: false
+disable_root: true
 package_update: true
 packages:
   - ca-certificates
@@ -190,6 +201,7 @@ write_files:
       docker compose -f compose.yaml config
       docker compose -f compose.yaml build
       docker compose -f compose.yaml up -d postgres
+      chown -R $VM_USER:$VM_USER /opt/advized
       touch /var/lib/advized-bootstrap-complete
 runcmd:
   - [ bash, -lc, "/usr/local/sbin/advized-bootstrap.sh > /var/log/advized-bootstrap.log 2>&1" ]
