@@ -18,6 +18,13 @@ say() { printf "\n\033[1;36m%s\033[0m\n" "$*"; }
 warn() { printf "\n\033[1;33mWARNING:\033[0m %s\n" "$*"; }
 die() { printf "\n\033[1;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
+on_error() {
+  local rc=$?
+  printf "\n\033[1;31mINSTALLER FAILED\033[0m at line %s (exit %s).\n" "${BASH_LINENO[0]:-unknown}" "$rc" >&2
+  printf "If a VM was partially created, inspect it with: qm config %s\n" "${VMID:-<vmid>}" >&2
+  exit "$rc"
+}
+trap on_error ERR
 
 [[ $EUID -eq 0 ]] || die "Run this installer as root from the Proxmox VE shell."
 [[ -r /etc/pve/.version ]] || die "This does not appear to be a Proxmox VE host."
@@ -40,6 +47,7 @@ read -rp "Disk size GB [$DISK_GB_DEFAULT]: " DISK_GB; DISK_GB="${DISK_GB:-$DISK_
 read -rp "Network bridge [$BRIDGE_DEFAULT]: " BRIDGE; BRIDGE="${BRIDGE:-$BRIDGE_DEFAULT}"
 read -rp "VM disk storage [$STORAGE_DEFAULT]: " STORAGE; STORAGE="${STORAGE:-$STORAGE_DEFAULT}"
 read -rp "Cloud image storage [$CLOUD_IMAGE_STORAGE_DEFAULT]: " CLOUD_IMAGE_STORAGE; CLOUD_IMAGE_STORAGE="${CLOUD_IMAGE_STORAGE:-$CLOUD_IMAGE_STORAGE_DEFAULT}"
+read -rp "Ubuntu username [advized]: " VM_USER; VM_USER="${VM_USER:-advized}"
 
 qm status "$VMID" >/dev/null 2>&1 && die "VM ID $VMID already exists."
 ip link show "$BRIDGE" >/dev/null 2>&1 || die "Bridge $BRIDGE does not exist."
@@ -68,11 +76,25 @@ echo "Leave Allow write access UNCHECKED."
 echo
 read -rp "Press Enter after the deploy key has been added to GitHub..."
 
+say "Preparing VM administrator SSH key"
+PUBKEY_PATH="$KEY_DIR/vm_admin.pub"
+PRIVKEY_PATH="$KEY_DIR/vm_admin"
+if [[ ! -f "$PRIVKEY_PATH" ]]; then
+  ssh-keygen -t ed25519 -N "" -C "advized-admin-vm-${VMID}" -f "$PRIVKEY_PATH" >/dev/null
+fi
+chmod 600 "$PRIVKEY_PATH"
+chmod 644 "$PUBKEY_PATH"
+
 KNOWN_HOSTS="$KEY_DIR/known_hosts"
 ssh-keyscan -t ed25519 github.com > "$KNOWN_HOSTS" 2>/dev/null
 chmod 600 "$KNOWN_HOSTS"
 
 say "Deploy key prepared. The VM will validate private-repository access during first boot."
+
+echo
+echo "Ready to create VM $VMID ($VM_NAME) with $CORES cores, $MEMORY MB RAM and $DISK_GB GB disk."
+read -rp "Create the Advized VM now? [y/N]: " CONFIRM
+[[ "$CONFIRM" =~ ^[Yy]$ ]] || die "Installation cancelled before any VM was created."
 
 say "Downloading Ubuntu 24.04 cloud image"
 IMAGE_DIR="/var/lib/vz/template/iso"
@@ -93,18 +115,8 @@ qm set "$VMID" --boot order=scsi0
 qm set "$VMID" --serial0 socket --vga serial0
 qm set "$VMID" --ipconfig0 ip=dhcp
 
-read -rp "Ubuntu username [advized]: " VM_USER
-VM_USER="${VM_USER:-advized}"
-read -rsp "Set a temporary password for $VM_USER: " VM_PASSWORD
-echo
-[[ -n "$VM_PASSWORD" ]] || die "Password cannot be empty."
-qm set "$VMID" --ciuser "$VM_USER" --cipassword "$VM_PASSWORD"
+qm set "$VMID" --ciuser "$VM_USER"
 
-PUBKEY_PATH="$KEY_DIR/vm_admin.pub"
-PRIVKEY_PATH="$KEY_DIR/vm_admin"
-if [[ ! -f "$PRIVKEY_PATH" ]]; then
-  ssh-keygen -t ed25519 -N "" -C "advized-admin-vm-${VMID}" -f "$PRIVKEY_PATH" >/dev/null
-fi
 qm set "$VMID" --sshkeys "$PUBKEY_PATH"
 
 say "Creating cloud-init first-boot configuration"
