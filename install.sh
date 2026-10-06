@@ -123,7 +123,7 @@ say "Creating cloud-init first-boot configuration"
 if ! pvesm status | awk 'NR>1 {print $1}' | grep -Fxq "local"; then
   die "Proxmox directory storage named local is required for the Cloud-Init snippet."
 fi
-LOCAL_CONTENT="$(pvesm config local | awk '/^content/ {print $2}')"
+LOCAL_CONTENT="$(awk '   $1=="dir:" && $2=="local" {in_local=1; next}   /^[^[:space:]]/ && in_local {exit}   in_local && $1=="content" {print $2; exit} ' /etc/pve/storage.cfg)"
 if [[ ",$LOCAL_CONTENT," != *",snippets,"* ]]; then
   warn "Enabling snippets content on Proxmox storage local."
   if [[ -n "$LOCAL_CONTENT" ]]; then
